@@ -1,0 +1,24 @@
+binance-trading-bot/
+├── main.go                       # Punto de entrada y orquestación del bot
+├── config/
+│   └── config.go                 # Carga de variables de entorno y configuración del bot
+├── controllers/                  # NO NECESARIO PARA ESTE PROYECTO (Es un bot, no una API web)
+├── models/
+│   ├── order.go                  # Estructura para representar una orden (compra/venta)
+│   ├── trade.go                  # Estructura para representar un trade (compra ejecutada + venta esperada)
+│   └── bot_state.go              # Modelo para persistir el estado del bot (órdenes pendientes, etc.)
+├── services/
+│   ├── binance_service.go        # Interacción con la API de Binance (compra, venta, precio actual, etc.)
+│   ├── trading_strategy.go       # Lógica principal del bot (cómo y cuándo comprar/vender)
+│   └── state_manager.go          # Gestión de la persistencia del estado del bot
+├── repositories/
+│   └── trade_repository.go       # Almacenamiento de trades en la DB (PostgreSQL)
+├── database/
+│   └── postgres.go               # Conexión y migración a PostgreSQL
+├── utils/
+│   ├── logger.go                 # Configuración de logs
+│   ├── price_calculator.go       # Funciones para calcular precios de compra/venta
+│   └── env.go                    # Helper para cargar variables de entorno
+├── go.mod
+├── go.sum
+└── .env    
