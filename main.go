@@ -1,17 +1,17 @@
 package main
 
 import (
+	"binance-trader-bot/config"
 	"context"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
-	"trading/config"
 
-	"trading/database"
-	"trading/repositories"
-	"trading/services"
-	"trading/utils" // Asumiendo que utils/logger.go está aquí
+	"binance-trader-bot/database"
+	"binance-trader-bot/repositories"
+	"binance-trader-bot/services"
+	"binance-trader-bot/utils" // Asumiendo que utils/logger.go está aquí
 )
 
 func main() {

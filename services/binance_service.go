@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"trading/models" // Importar los modelos definidos
-	"trading/utils"  // Importar el logger
+	"binance-trader-bot/models" // Importar los modelos definidos
+	"binance-trader-bot/utils"  // Importar el logger
 
 	"github.com/adshao/go-binance/v2/spot" // Cliente de Binance para Spot trading
 	"github.com/shopspring/decimal"        // Para manejar floats de forma precisa en cálculos financieros

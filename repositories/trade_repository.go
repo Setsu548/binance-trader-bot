@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"trading/models" // Importar los modelos
+	"binance-trader-bot/models" // Importar los modelos
 )
 
 // TradeRepository handles database operations for Orders, Trades, and BotState.

@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"trading/models" // Importar los modelos
-	"trading/repositories"
-	"trading/utils" // Importar el logger
+	"binance-trader-bot/models" // Importar los modelos
+	"binance-trader-bot/repositories"
+	"binance-trader-bot/utils" // Importar el logger
 )
 
 // StateManager handles the persistence and retrieval of the bot's state.

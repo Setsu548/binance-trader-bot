@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"trading/config"
-	"trading/models"
-	"trading/utils"
+	"binance-trader-bot/config"
+	"binance-trader-bot/models"
+	"binance-trader-bot/utils"
 )
 
 // TradingStrategy implements the core logic of the automated trading bot.
