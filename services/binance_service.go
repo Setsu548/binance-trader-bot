@@ -10,25 +10,24 @@ import (
 	"binance-trader-bot/models" // Importar los modelos definidos
 	"binance-trader-bot/utils"  // Importar el logger
 
-	"github.com/adshao/go-binance/v2/spot" // Cliente de Binance para Spot trading
-	"github.com/shopspring/decimal"        // Para manejar floats de forma precisa en cálculos financieros
+	"github.com/adshao/go-binance/v2" // Cliente de Binance para Spot trading
+	"github.com/shopspring/decimal"   // Para manejar floats de forma precisa en cálculos financieros
 )
 
 // BinanceService provides an interface for interacting with the Binance API.
 type BinanceService struct {
-	client  *spot.Client
+	client  *binance.Client // Changed to *binance.Client
 	testnet bool
 	logger  *utils.Logger
 }
 
-// NewBinanceService creates and returns a new BinanceService.
 func NewBinanceService(apiKey, secretKey string, useTestnet bool, logger *utils.Logger) *BinanceService {
-	var client *spot.Client
+	var client *binance.Client
 	if useTestnet {
-		client = spot.NewClient(apiKey, secretKey)
-		client.BaseURL = "https://testnet.binance.vision" // Binance Testnet base URL for spot
+		client = binance.NewClient(apiKey, secretKey)
+		client.BaseURL = "https://testnet.binance.vision" // Set testnet URL
 	} else {
-		client = spot.NewClient(apiKey, secretKey)
+		client = binance.NewClient(apiKey, secretKey)
 	}
 
 	return &BinanceService{
@@ -47,7 +46,7 @@ func (s *BinanceService) GetCurrentPrice(ctx context.Context, symbol string) (fl
 		return 0, fmt.Errorf("failed to get current price: %w", err)
 	}
 	if len(res) == 0 {
-		s.logger.Error("No price data returned for %s", symbol)
+		s.logger.Errorf("No price data returned for %s", symbol)
 		return 0, fmt.Errorf("no price data returned for %s", symbol)
 	}
 
@@ -61,153 +60,196 @@ func (s *BinanceService) GetCurrentPrice(ctx context.Context, symbol string) (fl
 	return price, nil
 }
 
-// PlaceLimitOrder places a new limit order (BUY or SELL) on Binance.
-// Returns the Binance order ID and an error if any.
-func (s *BinanceService) PlaceLimitOrder(
-	ctx context.Context,
-	symbol string,
-	orderType models.OrderType,
-	price float64,
-	quantity float64,
-) (*models.Order, error) {
+// PlaceLimitOrder places a limit order on Binance.
+func (s *BinanceService) PlaceLimitOrder(ctx context.Context, symbol string, orderType models.OrderType, price float64, quantity float64) (*models.Order, error) {
 	s.logger.Infof("Attempting to place %s limit order for %f %s at price %f", orderType, quantity, symbol, price)
 
-	// Use decimal for precision in calculations to avoid floating point issues
+	// Convert price and quantity to Decimal for precision
 	priceDec := decimal.NewFromFloat(price)
 	quantityDec := decimal.NewFromFloat(quantity)
 
-	// Get exchange info to determine precision rules
+	// Retrieve exchange info to get lot size and price filter rules for the symbol
 	exchangeInfo, err := s.client.NewExchangeInfoService().Symbol(symbol).Do(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get exchange info for %s: %w", symbol, err)
 	}
+	if len(exchangeInfo.Symbols) == 0 {
+		return nil, fmt.Errorf("exchange info not found for symbol %s", symbol)
+	}
+	symbolInfo := exchangeInfo.Symbols[0]
 
-	var pricePrecision, quantityPrecision int
-	foundSymbol := false
-	for _, symInfo := range exchangeInfo.Symbols {
-		if symInfo.Symbol == symbol {
-			foundSymbol = true
-			for _, filter := range symInfo.Filters {
-				if filter.FilterType == "PRICE_FILTER" {
-					if tickSize, ok := filter.MetaData["tickSize"].(string); ok {
-						pricePrecision = countDecimalPlaces(tickSize)
-					}
-				}
-				if filter.FilterType == "LOT_SIZE" {
-					if stepSize, ok := filter.MetaData["stepSize"].(string); ok {
-						quantityPrecision = countDecimalPlaces(stepSize)
-					}
-				}
+	// Apply Filters
+	var tickSize, stepSize string
+	for _, filter := range symbolInfo.Filters {
+
+		filterType, ok := filter["filterType"].(string)
+		if !ok {
+			s.logger.Warnf("Filter missing 'filterType' field or not string type: %v", filter)
+			continue
+		}
+
+		switch filterType {
+		case "PRICE_FILTER":
+			if ts, ok := filter["tickSize"].(string); ok {
+				tickSize = ts
+			} else {
+				s.logger.Warnf("PRICE_FILTER missing 'tickSize' field or not string type: %v", filter)
 			}
-			break
+		case "LOT_SIZE":
+			if ss, ok := filter["stepSize"].(string); ok {
+				stepSize = ss
+			} else {
+				s.logger.Warnf("LOT_SIZE filter missing 'stepSize' field or not string type: %v", filter)
+			}
 		}
 	}
-	if !foundSymbol {
-		return nil, fmt.Errorf("symbol %s not found in exchange info", symbol)
+
+	if tickSize == "" || stepSize == "" {
+		return nil, fmt.Errorf("could not find PRICE_FILTER or LOT_SIZE filter for symbol %s", symbol)
 	}
 
-	// Format price and quantity according to Binance's precision rules
-	formattedPrice := priceDec.Round(int32(pricePrecision)).String()
-	formattedQuantity := quantityDec.Round(int32(quantityPrecision)).String()
+	// Calculate decimal places for rounding
+	pricePrecision := countDecimalPlaces(tickSize)
+	quantityPrecision := countDecimalPlaces(stepSize)
 
-	newOrderService := s.client.NewCreateOrderService().
+	// --- ESTAS SON LAS LÍNEAS CLAVE QUE DEBEN ESTAR DECLARADAS AQUÍ ---
+	// Round price and quantity according to exchange rules
+	roundedPrice := priceDec.Round(int32(pricePrecision))
+	roundedQuantity := quantityDec.Round(int32(quantityPrecision))
+	// --- FIN LÍNEAS CLAVE ---
+
+	// Check if rounded quantity is less than minimum allowed by lot size filter
+	lotSizeFilter := symbolInfo.LotSizeFilter()
+	if lotSizeFilter == nil {
+		return nil, fmt.Errorf("LotSize filter not found for symbol %s", symbol)
+	}
+	minQtyDec, _ := decimal.NewFromString(lotSizeFilter.MinQuantity)
+
+	if roundedQuantity.LessThan(minQtyDec) {
+		s.logger.Warnf("Calculated quantity %s is less than minimum allowed %s for %s. Adjusting to minimum.", roundedQuantity, minQtyDec, symbol)
+		roundedQuantity = minQtyDec // Use minimum quantity if calculated is too small
+	}
+
+	orderService := s.client.NewCreateOrderService().
 		Symbol(symbol).
-		Side(string(orderType)). // Convert models.OrderType to string
-		Type(spot.OrderTypeLimit).
-		TimeInForce(spot.TimeInForceGTC). // Good Till Cancelled
-		Quantity(formattedQuantity).
-		Price(formattedPrice)
+		Quantity(roundedQuantity.String()). // Use rounded quantity string
+		Price(roundedPrice.String()).       // Use rounded price string
+		TimeInForce(binance.TimeInForceTypeGTC)
 
-	res, err := newOrderService.Do(ctx)
+	// Set order type (BUY/SELL)
+	switch orderType {
+	case models.OrderTypeBuy:
+		orderService.Side(binance.SideTypeBuy).Type(binance.OrderTypeLimit)
+	case models.OrderTypeSell:
+		orderService.Side(binance.SideTypeSell).Type(binance.OrderTypeLimit)
+	default:
+		return nil, fmt.Errorf("unsupported order type: %s", orderType)
+	}
+
+	// Execute the order
+	binanceOrder, err := orderService.Do(ctx)
 	if err != nil {
-		s.logger.Errorf("Failed to place %s order for %s: %v", orderType, symbol, err)
-		return nil, fmt.Errorf("failed to place order: %w", err)
+		s.logger.Errorf("Failed to place order on Binance: %v", err)
+		return nil, fmt.Errorf("failed to place order on Binance: %w", err)
 	}
 
-	orderID, err := strconv.ParseInt(fmt.Sprintf("%v", res.OrderID), 10, 64) // Convert OrderID to int64
-	if err != nil {
-		s.logger.Errorf("Failed to parse Binance OrderID %v: %v", res.OrderID, err)
-		return nil, fmt.Errorf("failed to parse Binance OrderID: %w", err)
+	s.logger.Infof("Order placed successfully on Binance: ID %d, Status: %s", binanceOrder.OrderID, binanceOrder.Status)
+
+	// Convert Binance API response to our internal Order model
+	ourOrderType := models.OrderType(binanceOrder.Side)
+	if binanceOrder.Type == binance.OrderTypeMarket {
+		ourOrderType = models.OrderType(binanceOrder.Type)
 	}
 
-	// Calculate quote quantity if it's a BUY order, for consistency in model
-	quoteQty := 0.0
-	if orderType == models.OrderTypeBuy {
-		// Use the originally requested quote quantity for the model before Binance rounds
-		quoteQty = quantity * price
-	} else {
-		// For SELL, it's the quantity sold * price
-		quoteQty = quantity * price
+	priceF, _ := strconv.ParseFloat(binanceOrder.Price, 64)
+	origQtyF, _ := strconv.ParseFloat(binanceOrder.OrigQuantity, 64)
+	executedQtyF, _ := strconv.ParseFloat(binanceOrder.ExecutedQuantity, 64)
+
+	quoteQtyF := 0.0
+	if executedQtyF > 0 && priceF > 0 {
+		quoteQtyF = executedQtyF * priceF
+	} else if origQtyF > 0 && priceF > 0 && (binanceOrder.Status == string(models.OrderStatusNew) || binanceOrder.Status == string(models.OrderStatusPartiallyFilled)) {
+		quoteQtyF = origQtyF * priceF
 	}
 
-	// Convert Binance status string to models.OrderStatus
-	binanceOrderStatus := models.OrderStatus(res.Status)
+	orderStatus := models.OrderStatus(binanceOrder.Status)
+	placedAt := time.Unix(0, binanceOrder.UpdateTime*int64(time.Millisecond))
 
-	s.logger.Infof("Successfully placed %s order for %s. Binance ID: %d, Status: %s, Price: %s, Qty: %s",
-		orderType, symbol, orderID, binanceOrderStatus, formattedPrice, formattedQuantity)
+	var executedAt *time.Time
+	if orderStatus == models.OrderStatusFilled || orderStatus == models.OrderStatusPartiallyFilled {
+		t := time.Unix(0, binanceOrder.UpdateTime*int64(time.Millisecond))
+		executedAt = &t
+	}
 
-	return models.NewOrder(
-		orderID,
-		symbol,
-		orderType,
-		price,    // Store the original requested price
-		quantity, // Store the original requested quantity
-		quoteQty,
-		binanceOrderStatus,
-		s.testnet,
-	), nil
+	isTest := s.testnet
+
+	return &models.Order{
+		BinanceID:     binanceOrder.OrderID,
+		Symbol:        binanceOrder.Symbol,
+		Type:          ourOrderType,
+		Price:         priceF,
+		Quantity:      origQtyF,
+		QuoteQty:      quoteQtyF,
+		Status:        orderStatus,
+		IsTest:        isTest,
+		PlacedAt:      placedAt,
+		ExecutedAt:    executedAt,
+		LastUpdatedAt: placedAt,
+	}, nil
 }
 
-// GetOrderStatus fetches the current status of an order by its Binance ID.
+// GetOrderStatus fetches the status of an order from Binance.
 func (s *BinanceService) GetOrderStatus(ctx context.Context, symbol string, binanceOrderID int64) (*models.Order, error) {
-	s.logger.Debugf("Checking status for order ID %d for symbol %s...", binanceOrderID, symbol)
+	s.logger.Debugf("Fetching status for Binance order ID %d on symbol %s", binanceOrderID, symbol)
 
-	order, err := s.client.NewGetOrderService().Symbol(symbol).OrderID(binanceOrderID).Do(ctx)
+	orderRes, err := s.client.NewGetOrderService().
+		Symbol(symbol).
+		OrderID(binanceOrderID).
+		Do(ctx)
 	if err != nil {
-		s.logger.Errorf("Failed to get status for order ID %d (%s): %v", binanceOrderID, symbol, err)
+		s.logger.Errorf("Failed to get order status for ID %d on symbol %s: %v", binanceOrderID, symbol, err)
 		return nil, fmt.Errorf("failed to get order status: %w", err)
 	}
 
-	price, _ := strconv.ParseFloat(order.Price, 64)
-	origQty, _ := strconv.ParseFloat(order.OrigQuantity, 64)
-	executedQty, _ := strconv.ParseFloat(order.ExecutedQuantity, 64)
-	cummulativeQuoteQty, _ := strconv.ParseFloat(order.CummulativeQuoteQty, 64)
+	priceF, _ := strconv.ParseFloat(orderRes.Price, 64)
+	origQtyF, _ := strconv.ParseFloat(orderRes.OrigQuantity, 64)
+	executedQtyF, _ := strconv.ParseFloat(orderRes.ExecutedQuantity, 64)
 
-	// If order is FILLED or PARTIALLY_FILLED, the actual executed price might differ slightly from limit price
-	// For simplicity, we'll use the original price for now, but in a real bot,
-	// you'd typically use `price` from the response for filled orders or weighted average.
-	actualExecutedPrice := price
-	if order.Status == string(models.OrderStatusFilled) || order.Status == string(models.OrderStatusPartiallyFilled) {
-		if executedQty > 0 {
-			// For filled orders, use average price if available or cummulativeQuoteQty / executedQty
-			if cummulativeQuoteQty > 0 {
-				actualExecutedPrice = cummulativeQuoteQty / executedQty
-			}
-		}
+	// --- CORRECCIÓN TAMBIÉN AQUÍ ---
+	// For GetOrderService response, it generally has a CumQuote field.
+	// If it doesn't, calculate from ExecutedQuantity * Price
+	quoteQtyF := 0.0
+	if orderRes.CummulativeQuoteQuantity != "" { // Check if the field exists and is not empty
+		quoteQtyF, _ = strconv.ParseFloat(orderRes.CummulativeQuoteQuantity, 64)
+	} else if executedQtyF > 0 && priceF > 0 {
+		quoteQtyF = executedQtyF * priceF
 	}
 
-	retrievedOrder := models.NewOrder(
-		order.OrderID,
-		order.Symbol,
-		models.OrderType(order.Side),
-		actualExecutedPrice, // Use executed price for filled/partially filled
-		origQty,
-		cummulativeQuoteQty, // This is the total quote asset spent/received
-		models.OrderStatus(order.Status),
-		s.testnet,
-	)
-	if order.UpdateTime != 0 {
-		updateTime := time.Unix(order.UpdateTime/1000, (order.UpdateTime%1000)*int64(time.Millisecond))
-		retrievedOrder.LastUpdatedAt = updateTime
-		if order.Status == string(models.OrderStatusFilled) || order.Status == string(models.OrderStatusPartiallyFilled) {
-			retrievedOrder.ExecutedAt = &updateTime
-		}
+	orderStatus := models.OrderStatus(orderRes.Status)
+	placedAt := time.Unix(0, orderRes.Time*int64(time.Millisecond)) // Time of creation
+	updatedAt := time.Unix(0, orderRes.UpdateTime*int64(time.Millisecond))
+
+	var executedAt *time.Time
+	if orderStatus == models.OrderStatusFilled || orderStatus == models.OrderStatusPartiallyFilled {
+		t := time.Unix(0, orderRes.UpdateTime*int64(time.Millisecond))
+		executedAt = &t
 	}
 
-	s.logger.Debugf("Order ID %d status: %s, Price: %f, Original Qty: %f, Executed Qty: %f",
-		binanceOrderID, retrievedOrder.Status, retrievedOrder.Price, retrievedOrder.Quantity, executedQty)
+	isTest := s.testnet
 
-	return retrievedOrder, nil
+	return &models.Order{
+		BinanceID:     orderRes.OrderID,
+		Symbol:        orderRes.Symbol,
+		Type:          models.OrderType(orderRes.Side),
+		Price:         priceF,
+		Quantity:      origQtyF,
+		QuoteQty:      quoteQtyF, // Use the (corrected) quoteQtyF
+		Status:        orderStatus,
+		IsTest:        isTest,
+		PlacedAt:      placedAt,
+		ExecutedAt:    executedAt,
+		LastUpdatedAt: updatedAt,
+	}, nil
 }
 
 // CancelOrder cancels an open order on Binance.
@@ -222,52 +264,34 @@ func (s *BinanceService) CancelOrder(ctx context.Context, symbol string, binance
 	return nil
 }
 
-// GetAccountBalances fetches the current USDT and BTC balances.
-func (s *BinanceService) GetAccountBalances(ctx context.Context, symbol string) (usdtBalance, btcBalance float64, err error) {
-	s.logger.Debugf("Fetching account balances...")
-
-	account, err := s.client.NewGetAccountService().Do(ctx)
+// GetAccountBalance fetches the balance of a specific asset from the user's Binance account.
+func (s *BinanceService) GetAccountBalance(ctx context.Context, asset string) (float64, error) {
+	s.logger.Debugf("Fetching account balance for asset: %s", asset)
+	res, err := s.client.NewGetAccountService().Do(ctx)
 	if err != nil {
 		s.logger.Errorf("Failed to get account info: %v", err)
-		return 0, 0, fmt.Errorf("failed to get account info: %w", err)
+		return 0, fmt.Errorf("failed to get account info: %w", err)
 	}
 
-	baseAsset := symbol[:len(symbol)-4]  // e.g., BTC from BTCUSDT
-	quoteAsset := symbol[len(symbol)-4:] // e.g., USDT from BTCUSDT
-
-	for _, asset := range account.Balances {
-		if asset.Asset == quoteAsset {
-			free, parseErr := strconv.ParseFloat(asset.Free, 64)
-			if parseErr != nil {
-				s.logger.Errorf("Failed to parse %s free balance '%s': %v", quoteAsset, asset.Free, parseErr)
-				return 0, 0, fmt.Errorf("failed to parse %s balance: %w", quoteAsset, parseErr)
+	for _, balance := range res.Balances {
+		if balance.Asset == asset {
+			free, err := strconv.ParseFloat(balance.Free, 64)
+			if err != nil {
+				return 0, fmt.Errorf("failed to parse free balance for %s: %w", asset, err)
 			}
-			locked, parseErr := strconv.ParseFloat(asset.Locked, 64)
-			if parseErr != nil {
-				s.logger.Errorf("Failed to parse %s locked balance '%s': %v", quoteAsset, asset.Locked, parseErr)
-				return 0, 0, fmt.Errorf("failed to parse %s balance: %w", quoteAsset, parseErr)
+			locked, err := strconv.ParseFloat(balance.Locked, 64)
+			if err != nil {
+				return 0, fmt.Errorf("failed to parse locked balance for %s: %w", asset, err)
 			}
-			usdtBalance = free + locked // Total available balance
-		} else if asset.Asset == baseAsset {
-			free, parseErr := strconv.ParseFloat(asset.Free, 64)
-			if parseErr != nil {
-				s.logger.Errorf("Failed to parse %s free balance '%s': %v", baseAsset, asset.Free, parseErr)
-				return 0, 0, fmt.Errorf("failed to parse %s balance: %w", baseAsset, parseErr)
-			}
-			locked, parseErr := strconv.ParseFloat(asset.Locked, 64)
-			if parseErr != nil {
-				s.logger.Errorf("Failed to parse %s locked balance '%s': %v", baseAsset, asset.Locked, parseErr)
-				return 0, 0, fmt.Errorf("failed to parse %s balance: %w", baseAsset, parseErr)
-			}
-			btcBalance = free + locked // Total available balance
+			s.logger.Debugf("Balance for %s: Free=%f, Locked=%f", asset, free, locked)
+			return free + locked, nil
 		}
 	}
-
-	s.logger.Debugf("Account Balances - USDT: %f, %s: %f", usdtBalance, baseAsset, btcBalance)
-	return usdtBalance, btcBalance, nil
+	s.logger.Warnf("Asset %s not found in account balances.", asset)
+	return 0, nil // Return 0 if asset not found, or an error if you prefer
 }
 
-// Helper to count decimal places in a string representation of a float (e.g., "0.001" -> 3)
+// countDecimalPlaces helper function
 func countDecimalPlaces(s string) int {
 	if !strings.Contains(s, ".") {
 		return 0

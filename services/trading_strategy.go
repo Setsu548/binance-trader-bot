@@ -53,7 +53,7 @@ func (ts *TradingStrategy) ExecuteTradingCycle(ctx context.Context) error {
 	}
 
 	// 2. Refresh Account Balances
-	usdtBal, btcBal, err := ts.binanceService.GetAccountBalances(ctx, ts.config.Symbol)
+	usdtBal, btcBal, err := ts.binanceService.GetAccountBalance(ctx, ts.config.Symbol)
 	if err != nil {
 		ts.logger.Errorf("Failed to refresh account balances: %v", err)
 		// Don't stop the cycle, continue with potentially stale balances
@@ -292,75 +292,27 @@ func (ts *TradingStrategy) placeAdditionalBuyOrders(ctx context.Context, current
 		return nil
 	}
 
-	// Logic for additional buys:
-	// This is more complex. You'd typically want to buy if the price drops by a certain percentage
-	// from your *average buy price* or from the *last buy price*.
-	// For this test, let's assume we place additional buys based on a drop from the
-	// initial `currentPrice` at the beginning of the bot's execution, or a dynamic target.
-	// A simpler approach for the test would be to just keep buying if initial phase is done and we have USDT,
-	// and prices meet one of the BUY_PERCENTAGES thresholds relative to an anchor price.
-
-	// For simplicity, let's assume we want to buy if the current price is
-	// lower than any of our existing buy prices, or if it drops by a certain percentage
-	// from the overall average buy price or the last trade's buy price.
-	// For this test, we'll try to buy at specified percentages below the *current market price*
-	// if we haven't already filled at that level, or if we have funds.
-
-	// This part of the strategy needs to be carefully designed based on how you want
-	// the 'escalonadas' additional buys to work.
-	// Example: Try to place an order at a price that is X% below the current market price,
-	// if we don't have enough open positions or we have enough funds.
-
-	// Let's implement a simple logic: if price drops by X% from the highest BUY price seen so far, buy.
-	// Or, if we have available USDT, just place an order for the next available BUY_PERCENTAGE
-	// as long as we haven't bought at that exact level or lower recently.
-
 	// Get all currently open trades to know current positions
-	allTrades, err := ts.stateManager.GetOpenTrades(ctx) // This will fetch all trades (open, sold etc)
+	allTrades, err := ts.stateManager.GetOpenTrades(ctx) // This fetches trades with status models.TradeStatusOpen
 	if err != nil {
-		ts.logger.Errorf("Failed to retrieve all trades for additional buy logic: %v", err)
+		ts.logger.Errorf("Failed to retrieve open trades for additional buy logic: %v", err)
 		return err
 	}
 
-	// Calculate an average buy price from filled trades or highest buy price for reference
-	// For now, let's just consider buying at a percentage below the CURRENT_PRICE.
-	// The problem statement implies BUY_PERCENTAGES refer to price below CURRENT_PRICE.
+	// Simple logic using allTrades: Don't place additional buys if we already have too many open trades
+	// This is a placeholder; adjust threshold based on your risk appetite.
+	if len(allTrades) >= ts.config.MaxOpenTrades { // Asumir que existe config.MaxOpenTrades
+		ts.logger.Debugf("Max open trades (%d) reached. Skipping additional buy order.", ts.config.MaxOpenTrades)
+		return nil
+	}
 
-	var potentialBuyPrice float64
-	var chosenPercentage float64
+	// ... el resto de la lógica de placeAdditionalBuyOrders ...
 
-	// Iterate through BUY_PERCENTAGES to find the next opportunity
-	// (e.g., if price drops 1%, then 2%, etc.)
-	// This logic can be tricky to implement correctly with "escalonadas".
-	// A common way is to maintain a list of target buy prices and fill them.
-
-	// For a straightforward implementation: try to place an additional buy order
-	// at the lowest possible percentage (e.g., 1%) below current market price,
-	// if there's enough USDT and we haven't already placed similar orders.
-	// This simple logic might not be robust enough for real trading.
-
-	// For the test, let's simplify: if the initial phase is complete and we have USDT,
-	// and there are no *pending* buy orders from previous `BUY_PERCENTAGES` tries,
-	// place one at `BUY_PERCENTAGES[0]` below current price.
-	// A more sophisticated bot would track if a price level is already "covered" by a pending order.
-
-	// Check if there are any pending buy orders from previous additional buy attempts
-	// (You'd need a way to track these in the state manager or by querying Binance open orders filtered by type)
-	// For now, let's assume `manageOpenOrders` keeps everything up to date.
-
-	// If initial buying is complete, and we have enough USDT, and no pending buy orders (simplified)
+	// Si inicial buying is complete, and we have enough USDT, and no pending buy orders (simplified)
 	if botState.IsInitialBuyingComplete && botState.CurrentUSDTBalance >= ts.config.OrderAmount {
-		// Example: Just try to place an order at the first BUY_PERCENTAGE below market price
-		// This simplified logic doesn't prevent multiple orders at the same level if market fluctuates.
-		// A better strategy would be to check if a buy order already exists at that specific price.
-
 		if len(ts.config.BuyPercentages) > 0 {
-			chosenPercentage = ts.config.BuyPercentages[0] // Use the first percentage as an example
-			potentialBuyPrice = utils.CalculateBuyPrice(currentPrice, chosenPercentage)
-
-			// Add a simple check: don't place if we just bought at this price or lower.
-			// This requires more sophisticated state tracking (e.g., last additional buy price).
-			// For the test, this might be sufficient.
+			chosenPercentage := ts.config.BuyPercentages[0]
+			potentialBuyPrice := utils.CalculateBuyPrice(currentPrice, chosenPercentage)
 
 			ts.logger.Infof("Placing additional buy order: %f %s at %.8f USDT (%.2f%% below market %f)",
 				ts.config.OrderAmount/potentialBuyPrice, ts.config.Symbol, potentialBuyPrice, chosenPercentage, currentPrice)
@@ -372,11 +324,10 @@ func (ts *TradingStrategy) placeAdditionalBuyOrders(ctx context.Context, current
 				return err
 			}
 
-			// Save the new order
 			if err := ts.stateManager.AddOrder(ctx, order); err != nil {
 				ts.logger.Errorf("Failed to save additional buy order to DB: %v", err)
 			}
-			botState.UpdateBalances(botState.CurrentUSDTBalance-ts.config.OrderAmount, botState.CurrentBTCBalance) // Optimistic update
+			botState.UpdateBalances(botState.CurrentUSDTBalance-ts.config.OrderAmount, botState.CurrentBTCBalance)
 			ts.logger.Infof("Additional buy order %d placed.", order.BinanceID)
 		} else {
 			ts.logger.Debug("No BUY_PERCENTAGES defined for additional buys.")

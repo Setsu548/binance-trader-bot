@@ -1,107 +1,82 @@
+// main.go (ejemplo de cómo se verá la parte relevante)
+
 package main
 
 import (
-	"binance-trader-bot/config"
 	"context"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"binance-trader-bot/config"
 	"binance-trader-bot/database"
 	"binance-trader-bot/repositories"
 	"binance-trader-bot/services"
-	"binance-trader-bot/utils" // Asumiendo que utils/logger.go está aquí
+	"binance-trader-bot/utils"
 )
 
 func main() {
-	// 1. Inicializar el Logger
 	logger := utils.NewLogger()
-	logger.Info("Starting Binance Trading Bot...")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// 2. Cargar Configuración desde Variables de Entorno
+	// Cargar configuración
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		logger.Fatalf("Failed to load configuration: %v", err)
 	}
-	logger.Infof("Configuration loaded. Using Testnet: %t", cfg.UseTestnet)
 
-	// 3. Conectar a PostgreSQL
+	// Conectar a la base de datos
 	db, err := database.NewPostgresDB(cfg.DatabaseURL)
 	if err != nil {
-		logger.Fatalf("Failed to connect to PostgreSQL: %v", err)
+		logger.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer func() {
-		sqlDB, closeErr := db.DB()
-		if closeErr != nil {
-			logger.Errorf("Error getting underlying SQL DB for closing: %v", closeErr)
-		}
-		if sqlDB != nil {
-			if err := sqlDB.Close(); err != nil {
-				logger.Errorf("Error closing database connection: %v", err)
-			} else {
-				logger.Info("Database connection closed.")
-			}
-		}
-	}()
+	defer db.Close()
 
-	// Ejecutar migraciones (opcional, pero muy recomendado)
-	if err := database.RunMigrations(db); err != nil {
+	// Ejecutar migraciones (CORRECCIÓN AQUÍ)
+	err = database.RunMigrations(cfg.DatabaseURL) // <--- CORRECCIÓN CLAVE: Pasar cfg.DatabaseURL
+	if err != nil {
 		logger.Fatalf("Failed to run database migrations: %v", err)
 	}
-	logger.Info("Database migrations completed successfully.")
 
-	// 4. Inicializar Repositorios
+	// Inicializar repositorios
 	tradeRepo := repositories.NewTradeRepository(db)
-	logger.Info("Trade Repository initialized.")
 
-	// 5. Inicializar Servicios
-	binanceService := services.NewBinanceService(cfg.BinanceAPIKey, cfg.BinanceAPISecret, cfg.UseTestnet, logger)
-	stateManager := services.NewStateManager(tradeRepo, logger) // stateManager necesita el repositorio para persistir
+	// Inicializar servicios
+	binanceService := services.NewBinanceService(cfg.BinanceAPIKey, cfg.BinanceSecretKey, cfg.UseTestnet, logger)
+	stateManager := services.NewStateManager(tradeRepo, logger)
 	tradingStrategy := services.NewTradingStrategy(binanceService, stateManager, cfg, logger)
-	logger.Info("Services initialized.")
 
-	// 6. Contexto para manejo de señales de terminación
-	ctx, cancel := context.WithCancel(context.Background())
+	// Cargar estado inicial del bot
+	if err := stateManager.LoadBotState(ctx); err != nil {
+		logger.Fatalf("Failed to load bot state: %v", err)
+	}
 
-	// Capturar señales de sistema (Ctrl+C, etc.) para una terminación limpia
+	// Manejo de señales para un apagado limpio
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Bucle principal del bot
 	go func() {
-		sig := <-sigChan
-		logger.Warnf("Received signal: %v. Shutting down bot...", sig)
-		cancel() // Cancela el contexto para detener el bucle del bot
+		for {
+			select {
+			case <-ctx.Done():
+				logger.Info("Shutting down trading cycle loop...")
+				return
+			default:
+				if err := tradingStrategy.ExecuteTradingCycle(ctx); err != nil {
+					logger.Errorf("Error during trading cycle: %v", err)
+				}
+				logger.Infof("Next trading cycle in %d seconds...", cfg.TradingCycleIntervalSeconds)
+				time.Sleep(time.Duration(cfg.TradingCycleIntervalSeconds) * time.Second)
+			}
+		}
 	}()
 
-	// 7. Ejecutar la lógica principal del bot en un goroutine
-	// Usa un ticker para ejecutar la lógica cada cierto intervalo.
-	// El intervalo puede ser configurado en `config.go` o ser dinámico.
-	// Para empezar, usaremos un intervalo fijo o el ORDER_INTERVAL_MINUTES.
-	// La lógica real de temporización entre órdenes iniciales estará dentro de trading_strategy.
-	ticker := time.NewTicker(time.Duration(cfg.OrderIntervalMinutes) * time.Minute) // Puedes ajustar este tick principal
-	defer ticker.Stop()
-
-	// Cargar el estado inicial del bot al inicio
-	err = stateManager.LoadBotState(ctx)
-	if err != nil {
-		logger.Fatalf("Failed to load initial bot state: %v", err)
-	}
-	logger.Info("Bot state loaded successfully.")
-
-	// Bucle principal del bot
-	for {
-		select {
-		case <-ticker.C:
-			// Aquí se llamaría a la función principal que ejecuta toda la lógica del bot
-			// Por ejemplo, CheckAndPlaceOrders, ManageOpenOrders, etc.
-			logger.Info("Executing bot cycle...")
-			if err := tradingStrategy.ExecuteTradingCycle(ctx); err != nil {
-				logger.Errorf("Error during trading cycle: %v", err)
-			}
-		case <-ctx.Done():
-			logger.Info("Bot context cancelled. Exiting main loop.")
-			return // Salir del bucle principal
-		}
-	}
+	// Esperar señal de apagado
+	<-sigChan
+	logger.Info("Shutdown signal received. Exiting.")
+	cancel()                    // Notificar a las goroutines que se detengan
+	time.Sleep(2 * time.Second) // Dar tiempo para que las goroutines terminen
 }

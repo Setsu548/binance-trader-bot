@@ -18,8 +18,7 @@ func NewPostgresDB(dataSourceName string) (*sql.DB, error) {
 		return nil, fmt.Errorf("error opening database connection: %w", err)
 	}
 
-	// Ping the database to verify the connection is alive
-	for i := 0; i < 5; i++ { // Retry a few times in case DB is still starting
+	for i := 0; i < 5; i++ {
 		err = db.Ping()
 		if err == nil {
 			fmt.Println("Successfully connected to PostgreSQL!")
@@ -43,13 +42,13 @@ func NewPostgresDB(dataSourceName string) (*sql.DB, error) {
 // ├── 000002_create_trades_table.down.sql
 // └── 000003_create_bot_state_table.up.sql
 // └── 000003_create_bot_state_table.down.sql
-func RunMigrations(db *sql.DB) error {
+func RunMigrations(dataSourceName string) error {
 	// IMPORTANT: Ensure the path to your migrations directory is correct.
 	// It should be relative to where your 'go run' or 'go build' command is executed.
 	// If you run from the project root, "./migrations" is usually correct.
 	m, err := migrate.New(
 		"file://./migrations", // Path to your migration files
-		"postgres://"+db.Stats().OpenConnections.String()+"/"+db.Stats().WaitDuration.String(), // This is a placeholder, you should use the actual DSN
+		dataSourceName,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create migrate instance: %w", err)
