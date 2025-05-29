@@ -168,16 +168,22 @@ func (s *BinanceService) PlaceLimitOrder(ctx context.Context, symbol string, ord
 	quoteQtyF := 0.0
 	if executedQtyF > 0 && priceF > 0 {
 		quoteQtyF = executedQtyF * priceF
-	} else if origQtyF > 0 && priceF > 0 && (binanceOrder.Status == string(models.OrderStatusNew) || binanceOrder.Status == string(models.OrderStatusPartiallyFilled)) {
-		quoteQtyF = origQtyF * priceF
+	} else if origQtyF > 0 && priceF > 0 {
+		binanceOrderStatus := models.OrderStatus(binanceOrder.Status) // Convertir a nuestro tipo
+		if binanceOrderStatus == models.OrderStatusNew || binanceOrderStatus == models.OrderStatusPartiallyFilled {
+			quoteQtyF = origQtyF * priceF
+		}
 	}
 
 	orderStatus := models.OrderStatus(binanceOrder.Status)
-	placedAt := time.Unix(0, binanceOrder.UpdateTime*int64(time.Millisecond))
+
+	placedAt := time.Unix(0, binanceOrder.TransactTime*int64(time.Millisecond))
 
 	var executedAt *time.Time
 	if orderStatus == models.OrderStatusFilled || orderStatus == models.OrderStatusPartiallyFilled {
-		t := time.Unix(0, binanceOrder.UpdateTime*int64(time.Millisecond))
+		// Asumo que si está "Filled" o "PartiallyFilled" en el response de creación,
+		// entonces TransactTime puede considerarse el tiempo de la transacción.
+		t := time.Unix(0, binanceOrder.TransactTime*int64(time.Millisecond)) // Usar TransactTime
 		executedAt = &t
 	}
 

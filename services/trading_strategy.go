@@ -53,14 +53,31 @@ func (ts *TradingStrategy) ExecuteTradingCycle(ctx context.Context) error {
 	}
 
 	// 2. Refresh Account Balances
-	usdtBal, btcBal, err := ts.binanceService.GetAccountBalance(ctx, ts.config.Symbol)
+	var usdtBal float64
+	var btcBal float64
+	var err error // Variable para errores
+
+	usdtBal, err = ts.binanceService.GetAccountBalance(ctx, "USDT")
 	if err != nil {
-		ts.logger.Errorf("Failed to refresh account balances: %v", err)
-		// Don't stop the cycle, continue with potentially stale balances
-	} else {
-		botState.UpdateBalances(usdtBal, btcBal)
-		ts.logger.Infof("Current Balances: USDT: %f, BTC: %f", botState.CurrentUSDTBalance, botState.CurrentBTCBalance)
+		ts.logger.Errorf("Failed to refresh USDT balance: %v", err)
+		// Decide si quieres retornar, continuar, o manejar este error de otra forma
+		// Por ahora, para que compile y funcione, lo dejaré solo logueado.
+		// Podrías considerar un 'return' o un 'continue' en un ciclo.
+		// Para depuración, podríamos inicializar usdtBal a 0.
+		usdtBal = 0 // O manejar el error de otra forma
 	}
+
+	// Obtener el balance de BTC
+	btcBal, err = ts.binanceService.GetAccountBalance(ctx, "BTC") // Asumiendo que "BTC" es el asset string
+	if err != nil {
+		ts.logger.Errorf("Failed to refresh BTC balance: %v", err)
+		// Decide si quieres retornar, continuar, o manejar este error de otra forma
+		// Para depuración, podríamos inicializar btcBal a 0.
+		btcBal = 0 // O manejar el error de otra forma
+	}
+
+	botState.UpdateBalances(usdtBal, btcBal)
+	ts.logger.Infof("Balances refreshed: USDT=%f, BTC=%f", usdtBal, btcBal)
 
 	// 3. Get Current Market Price
 	currentPrice, err := ts.binanceService.GetCurrentPrice(ctx, ts.config.Symbol)
